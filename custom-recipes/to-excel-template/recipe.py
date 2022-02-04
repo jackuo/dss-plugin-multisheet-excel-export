@@ -1,7 +1,7 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
 """
-Custom recipe for Excel Multi Sheet Exporter
+Custom recipe for Multisheet Export to Existing Excel Template
 """
 
 import logging
@@ -14,32 +14,41 @@ from dataiku.customrecipe import get_output_names_for_role
 from dataiku.customrecipe import get_recipe_config
 
 from cache_utils import CustomTmpFile
-from xlsx_writer import dataframes_to_xlsx, dataframes_to_update
+from xlsx_writer import dataframes_to_xlsx_template
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO, format='Multi-Sheet Excel Exporter | %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format='Multi-Sheet Excel Export to Existing Excel Template | %(levelname)s - %(message)s')
 
-input_datasets_ids = get_input_names_for_role('input_dataset')
+### Get User Input Values ###
+# read in input datasets
+input_datasets_ids = get_input_names_for_role('input_dataset2')
 if len(input_datasets_ids) == 0:
     logger.warning("Received no input datasets ids. input_datasets_ids={}".format(input_datasets_ids))
-
+# make a list of input datasetsbook.defined_names[named_range]
 input_datasets_names = [name.split('.')[-1] for name in input_datasets_ids]
 if len(input_datasets_names) == 0:
     logger.warning("Received no input datasets names. input_datasets_ids={}, input_datasets_names={}".format(
         input_datasets_ids, input_datasets_names))
 
-# Retrieve the list of output folders, should contain unique element
+
+# get input folder containing template
+input_folder_with_template_id = get_input_names_for_role('input_folder_with_template')
+input_folder_with_template_name = input_folder_with_template_id[0]
+input_folder_template = dataiku.Folder(input_folder_with_template_name)
+
+# get path of excel template in folder
+excel_template_name = input_folder_template.list_paths_in_partition()[0][1:]
+
+# retrieve the output folder_id
 output_folder_id = get_output_names_for_role('folder')
 logger.info("Retrieved the following folder ids: {}".format(output_folder_id))
 output_folder_name = output_folder_id[0]
 logger.info("Received the following output folder name: {}".format(output_folder_name))
 output_folder = dataiku.Folder(output_folder_name)
 
+# set up output file and folder name
 input_config = get_recipe_config()
 workbook_name = input_config.get('output_workbook_name', None)
-update_sheets = input_config.get('update_sheets', False)
-append_data = input_config.get('append_data', False)
-
 
 if workbook_name is None:
     logger.warning("Received input received recipe config: {}".format(input_config))
@@ -52,24 +61,36 @@ try:
 except ValidationError as e:
     raise ValueError(f"{e}\n")
 
-xlsx_abs_path=os.path.join(output_folder.get_path(),output_file_name)
+# set up named range mapping
+mapping = input_config.get('mapping')
+for dataset, named_range in mapping.items():
+    if dataset in input_datasets_names:
+        continue
+    else:
+        logger.warning("Received these input received recipe config parameters: {}".format(input_config))
+        raise ValueError('The dataset, called {}, mapped to the Named Range {}, does not exist'.format(dataset, mapping[dataset]))
 
+### Start Work ###
+
+# Create Temporary file
 tmp_file_helper = CustomTmpFile()
 tmp_file_path = tmp_file_helper.get_temporary_cache_file(output_file_name)
 logger.info("Intend to write the output xls file to the following location: {}".format(tmp_file_path))
 
-try:
-    output_folder.get_download_stream(output_file_name)
-    logger.info("File exists: {}".format(output_file_name))
-except Exception as e:
-    logger.info("File doesn't exist: {} ".format(e))
-    update_sheets=False
+# Save template in temp path
+with input_folder_template.get_download_stream(excel_template_name) as stream:
+    data = stream.read()
+    stream.close()
 
-if update_sheets:
-    dataframes_to_update(input_datasets_names, xlsx_abs_path, tmp_file_path, lambda name: dataiku.Dataset(name).get_dataframe(), append_data)
-else:
-    dataframes_to_xlsx(input_datasets_names, tmp_file_path, lambda name: dataiku.Dataset(name).get_dataframe())
+with open(tmp_file_path, "wb") as binary_file:
+    # Write bytes to file
+    binary_file.write(data)
 
+
+# Iterate through the input datasets, and insert into appropriate sheet and location in template (stored in temp file path)
+dataframes_to_xlsx_template(input_datasets_names, mapping, tmp_file_path, lambda name: dataiku.Dataset(name).get_dataframe())
+
+# Save file to output folder
 with open(tmp_file_path, 'rb', encoding=None) as f:
     output_folder.upload_stream(output_file_name, f)
 
